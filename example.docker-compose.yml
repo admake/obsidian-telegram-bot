@@ -1,0 +1,14 @@
+services:
+  obsidian-bot:
+    build: .
+    container_name: obsidian-bot
+    restart: unless-stopped
+    volumes:
+      - /volume1/obsidian/inbox:/app/vault
+    env_file:
+      - .env
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
