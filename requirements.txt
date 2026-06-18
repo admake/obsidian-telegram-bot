@@ -1,3 +1,3 @@
-python-telegram-bot>=20.0
-httpx
+python-telegram-bot[socks]>=20.0
+httpx[socks]
 PyYAML
