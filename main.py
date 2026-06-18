@@ -16,7 +16,7 @@ ALLOWED_USERS = [
     int(u.strip()) for u in os.getenv("ALLOWED_USERS", "").split(",") if u.strip()
 ]
 VAULT_PATH = "/app/vault"
-ATTACHMENTS_PATH = os.path.join(VAULT_PATH, "assets")
+ATTACHMENTS_PATH = os.path.join(VAULT_PATH, "Attachments")
 os.makedirs(ATTACHMENTS_PATH, exist_ok=True)
 
 
