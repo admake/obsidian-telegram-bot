@@ -3,8 +3,6 @@ import re
 import logging
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-
-import httpx
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
@@ -79,26 +77,8 @@ if __name__ == "__main__":
     # Запуск Healthcheck в фоне
     threading.Thread(target=run_health_server, daemon=True).start()
 
-    # --- Настройка прокси через стандартные переменные окружения ---
+    # Инициализация бота — прокси автоматически берётся из http_proxy/https_proxy
     builder = ApplicationBuilder().token(TOKEN)
-
-    # Читаем прокси из переменных окружения (стандартные имена)
-    http_proxy = os.getenv("http_proxy") or os.getenv("HTTP_PROXY")
-    https_proxy = os.getenv("https_proxy") or os.getenv("HTTPS_PROXY")
-
-    if http_proxy or https_proxy:
-        proxies = {}
-        if http_proxy:
-            proxies["http://"] = http_proxy
-        if https_proxy:
-            proxies["https://"] = https_proxy
-        # Создаём асинхронный HTTP-клиент с прокси
-        client = httpx.AsyncClient(proxies=proxies)
-        builder.http_client(client)
-        logging.info(f"Прокси настроен: http={http_proxy}, https={https_proxy}")
-    else:
-        logging.info("Прокси не задан, работаем напрямую")
-
     app = builder.build()
     app.add_handler(
         MessageHandler(filters.TEXT | filters.CAPTION | filters.PHOTO, handle_message)
