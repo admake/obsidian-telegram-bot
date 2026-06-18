@@ -1,9 +1,10 @@
 import os
 import re
 import logging
-import asyncio
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
+
+import httpx
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
@@ -11,12 +12,11 @@ from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTyp
 logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-PROXY_URL = os.getenv("PROXY_URL")
 ALLOWED_USERS = [
     int(u.strip()) for u in os.getenv("ALLOWED_USERS", "").split(",") if u.strip()
 ]
 VAULT_PATH = "/app/vault"
-ATTACHMENTS_PATH = os.path.join(VAULT_PATH, "Attachments")
+ATTACHMENTS_PATH = os.path.join(VAULT_PATH, "assets")
 os.makedirs(ATTACHMENTS_PATH, exist_ok=True)
 
 
@@ -79,23 +79,34 @@ if __name__ == "__main__":
     # Запуск Healthcheck в фоне
     threading.Thread(target=run_health_server, daemon=True).start()
 
-    # ИНИЦИАЛИЗАЦИЯ (v20+ API)
+    # --- Настройка прокси через стандартные переменные окружения ---
     builder = ApplicationBuilder().token(TOKEN)
-    if PROXY_URL:
-        # Это единственный верный способ в 20+ версиях
-        builder.proxy_url(PROXY_URL)
+
+    # Читаем прокси из переменных окружения (стандартные имена)
+    http_proxy = os.getenv("http_proxy") or os.getenv("HTTP_PROXY")
+    https_proxy = os.getenv("https_proxy") or os.getenv("HTTPS_PROXY")
+
+    if http_proxy or https_proxy:
+        proxies = {}
+        if http_proxy:
+            proxies["http://"] = http_proxy
+        if https_proxy:
+            proxies["https://"] = https_proxy
+        # Создаём асинхронный HTTP-клиент с прокси
+        client = httpx.AsyncClient(proxies=proxies)
+        builder.http_client(client)
+        logging.info(f"Прокси настроен: http={http_proxy}, https={https_proxy}")
+    else:
+        logging.info("Прокси не задан, работаем напрямую")
 
     app = builder.build()
     app.add_handler(
         MessageHandler(filters.TEXT | filters.CAPTION | filters.PHOTO, handle_message)
     )
 
-    # Graceful Shutdown
-    loop = asyncio.get_event_loop()
+    # Запуск бота
     try:
         logging.info("Бот запущен...")
         app.run_polling()
     except (KeyboardInterrupt, SystemExit):
         logging.info("Завершение работы...")
-    finally:
-        loop.close()
