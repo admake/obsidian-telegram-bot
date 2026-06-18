@@ -38,6 +38,21 @@ def is_authorized(update: Update) -> bool:
     return update.effective_user.id in ALLOWED_USERS
 
 
+def get_forward_info(msg):
+    """Извлекает информацию о пересылке (forward_from)"""
+    if msg.forward_from:
+        user = msg.forward_from
+        name = user.full_name or user.username or "Unknown"
+        link = f"https://t.me/{user.username}" if user.username else None
+        return {"name": name, "link": link}
+    elif msg.forward_from_chat:
+        chat = msg.forward_from_chat
+        name = chat.title or chat.full_name or "Unknown Chat"
+        link = f"https://t.me/{chat.username}" if chat.username else None
+        return {"name": name, "link": link}
+    return None
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         await update.message.reply_text("Access denied.")
@@ -46,29 +61,52 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     text = msg.text or msg.caption or "Без текста"
 
+    # --- Обработка медиа (фото) ---
     media_link = ""
     if msg.photo:
         file = await context.bot.get_file(msg.photo[-1].file_id)
         file_name = f"{msg.date.strftime('%Y%m%d-%H%M%S')}_{msg.message_id}.jpg"
-        await file.download_to_drive(os.path.join(ATTACHMENTS_PATH, file_name))
+        file_path = os.path.join(ATTACHMENTS_PATH, file_name)
+        await file.download_to_drive(file_path)
+        # Принудительная синхронизация файла
+        with open(file_path, "ab") as f:
+            f.flush()
+            os.fsync(f.fileno())
         media_link = f"![[{file_name}]]"
 
+    # --- Формирование метаданных ---
     timestamp = msg.date.strftime("%Y-%m-%d-%H-%M")
     safe_content = re.sub(r'[\\/*?:"<>|]', "", text)[:30].strip() or "Untitled"
+
+    # Ссылка на сообщение
     link = (
         f"https://t.me/c/{str(msg.chat.id)[4:]}/{msg.message_id}"
         if str(msg.chat.id).startswith("-100")
         else f"https://t.me/{msg.from_user.username or 'u'}/{msg.message_id}"
     )
 
-    with open(
-        os.path.join(VAULT_PATH, f"{timestamp} - {safe_content}.md"),
-        "w",
-        encoding="utf-8",
-    ) as f:
+    # Информация о пересылке
+    forward = get_forward_info(msg)
+    forward_yaml = ""
+    if forward:
+        forward_yaml = f"\nforward_from: \"{forward['name']}\""
+        if forward["link"]:
+            forward_yaml += f"\nforward_link: {forward['link']}"
+
+    # --- Запись .md файла с принудительной синхронизацией ---
+    md_path = os.path.join(VAULT_PATH, f"{timestamp} - {safe_content}.md")
+    with open(md_path, "w", encoding="utf-8") as f:
         f.write(
-            f"---\naliases: [{safe_content}]\ntags: [telegram]\n---\n\n{text}\n\n{media_link}"
+            f"---\n"
+            f"aliases: [{safe_content}]\n"
+            f"tags: [telegram]\n"
+            f"source_link: {link}\n"
+            f"{forward_yaml}\n"
+            f"---\n\n"
+            f"{text}\n\n{media_link}"
         )
+        f.flush()
+        os.fsync(f.fileno())
 
     await update.message.reply_text(f"Saved: {safe_content}")
 
