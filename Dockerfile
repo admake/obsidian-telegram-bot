@@ -8,6 +8,6 @@ RUN apk add --no-cache ffmpeg
 WORKDIR /app
 COPY --from=builder /install /usr/local
 COPY main.py .
-RUN adduser -D botuser
+RUN adduser -D botuser && chown -R botuser:botuser /app
 USER botuser
 CMD ["python", "main.py"]
