@@ -4,6 +4,7 @@ import logging
 import threading
 import time
 import shutil
+import subprocess
 import asyncio
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
@@ -25,6 +26,7 @@ os.makedirs(STAGING_PATH, exist_ok=True)
 ATTACHMENTS_PATH = os.path.join(VAULT_PATH, "Attachments")
 os.makedirs(ATTACHMENTS_PATH, exist_ok=True)
 TRIGGER_PATH = os.path.join(VAULT_PATH, ".drive_sync")
+HOST_VAULT_PATH = os.getenv("HOST_VAULT_PATH")  # путь, смонтированныйreadonly из хоста
 
 
 def force_sync_directory(path):
@@ -103,6 +105,31 @@ def touch_trigger():
         logger.debug(f"Триггер обновлён: {TRIGGER_PATH}")
     except Exception as e:
         logger.warning(f"Не удалось обновить триггер {TRIGGER_PATH}: {e}")
+
+
+def force_drive_sync():
+    """Принудительно запускает синхронизацию Synology Drive через synodrivecli."""
+    try:
+        # Путь к бинарнику synodrivecli на хосте (смонтирован в контейнер)
+        cli_path = "/usr/syno/synoman/webman/3rdparty/Drive/bin/synodrivecli"
+        # Аргумент - путь к vault на хосте, как видит контейнер через отдельный монт
+        result = subprocess.run(
+            [cli_path, "--force-sync", HOST_VAULT_PATH],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        logger.info(f"Forced Drive sync: {result.stdout.strip()}")
+    except FileNotFoundError:
+        logger.warning(
+            "synodrivecli binary not found in container; ensure it's mounted."
+        )
+    except subprocess.CalledProcessError as e:
+        logger.warning(
+            f"synodrivecli failed with code {e.returncode}: {e.stderr.strip()}"
+        )
+    except Exception as e:
+        logger.warning(f"Unexpected error forcing Drive sync: {e}")
 
 
 async def trigger_loop():
@@ -200,7 +227,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- Запись .md файла в staging, затем атомарная замена в vault ---
     md_path_staging = os.path.join(STAGING_PATH, f"{timestamp} - {safe_content}.md")
-    md_path_vault   = os.path.join(VAULT_PATH,   f"{timestamp} - {safe_content}.md")
+    md_path_vault = os.path.join(VAULT_PATH, f"{timestamp} - {safe_content}.md")
     try:
         # 1. Пишем во временный staging‑файл
         with open(md_path_staging, "w", encoding="utf-8") as f:
@@ -213,6 +240,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"Файл сохранён (via staging): {md_path_vault}")
         # Обновляем триггер после каждой успешной записи
         touch_trigger()
+        # Принудительно заставляем Drive просканировать каталог
+        force_drive_sync()
     except Exception as e:
         logger.error(f"Ошибка записи файла: {e}")
         await update.message.reply_text("Не удалось сохранить заметку.")
@@ -259,3 +288,4 @@ if __name__ == "__main__":
         app.run_polling(drop_pending_updates=True, allowed_updates=["message"])
     except (KeyboardInterrupt, SystemExit):
         logger.info("Завершение работы...")
+
