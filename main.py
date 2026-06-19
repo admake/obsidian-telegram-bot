@@ -3,6 +3,7 @@ import re
 import logging
 import threading
 import time
+import shutil
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
@@ -18,37 +19,10 @@ ALLOWED_USERS = [
     int(u.strip()) for u in os.getenv("ALLOWED_USERS", "").split(",") if u.strip()
 ]
 VAULT_PATH = "/app/vault"
+STAGING_PATH = os.path.join(VAULT_PATH, ".staging")
+os.makedirs(STAGING_PATH, exist_ok=True)
 ATTACHMENTS_PATH = os.path.join(VAULT_PATH, "Attachments")
 os.makedirs(ATTACHMENTS_PATH, exist_ok=True)
-
-
-# --- Healthcheck ---
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
-
-
-# --- Вспомогательные функции ---
-def is_authorized(update: Update) -> bool:
-    if not ALLOWED_USERS:
-        return True
-    return update.effective_user.id in ALLOWED_USERS
-
-
-def get_forward_info(msg):
-    if hasattr(msg, "forward_from") and msg.forward_from:
-        user = msg.forward_from
-        name = user.full_name or user.username or "Unknown"
-        link = f"https://t.me/{user.username}" if user.username else None
-        return {"name": name, "link": link}
-    if hasattr(msg, "forward_from_chat") and msg.forward_from_chat:
-        chat = msg.forward_from_chat
-        name = chat.title or chat.full_name or "Unknown Chat"
-        link = f"https://t.me/{chat.username}" if chat.username else None
-        return {"name": name, "link": link}
-    return None
 
 
 def force_sync_directory(path):
@@ -92,6 +66,59 @@ def force_sync_directory(path):
         logger.debug("Глобальная синхронизация выполнена")
     except Exception as e:
         logger.debug(f"os.sync() не доступен: {e}")
+
+
+def atomic_replace(src: str, dst: str) -> None:
+    """
+    Копирует файл src -> dst с последующей атомарной заменой.
+    Гарантирует, что dst получит полноценное событие CREATE/MODIFY
+    в хостовой файловой системе, даже если propagation выключен.
+    """
+    # Копируем с сохранением метаданных
+    shutil.copy2(src, dst)
+    # Принудительно сбрасываем кэш на уровне файла
+    with open(dst, "ab") as f:
+        f.flush()
+        os.fsync(f.fileno())
+    # Обновляем метки времени (изменяем ctime)
+    os.utime(dst, None)
+    os.chmod(dst, 0o644)
+    # Синхронизируем каталог назначения
+    force_sync_directory(os.path.dirname(dst))
+    # Удаляем временный исходник (опционально)
+    try:
+        os.remove(src)
+    except FileNotFoundError:
+        pass
+
+
+# --- Healthcheck ---
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+
+# --- Вспомогательные функции ---
+def is_authorized(update: Update) -> bool:
+    if not ALLOWED_USERS:
+        return True
+    return update.effective_user.id in ALLOWED_USERS
+
+
+def get_forward_info(msg):
+    if hasattr(msg, "forward_from") and msg.forward_from:
+        user = msg.forward_from
+        name = user.full_name or user.username or "Unknown"
+        link = f"https://t.me/{user.username}" if user.username else None
+        return {"name": name, "link": link}
+    if hasattr(msg, "forward_from_chat") and msg.forward_from_chat:
+        chat = msg.forward_from_chat
+        name = chat.title or chat.full_name or "Unknown Chat"
+        link = f"https://t.me/{chat.username}" if chat.username else None
+        return {"name": name, "link": link}
+    return None
 
 
 # --- Обработчик сообщений ---
@@ -151,23 +178,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{text}\n\n{media_link}"
     )
 
-    # --- Запись .md файла напрямую (без временного файла) ---
-    md_path = os.path.join(VAULT_PATH, f"{timestamp} - {safe_content}.md")
+    # --- Запись .md файла в staging, затем атомарная замена в vault ---
+    md_path_staging = os.path.join(STAGING_PATH, f"{timestamp} - {safe_content}.md")
+    md_path_vault   = os.path.join(VAULT_PATH,   f"{timestamp} - {safe_content}.md")
     try:
-        # Пишем напрямую – это вызовет событие CREATE
-        with open(md_path, "w", encoding="utf-8") as f:
+        # 1. Пишем во временный staging‑файл
+        with open(md_path_staging, "w", encoding="utf-8") as f:
             f.write(md_content)
             f.flush()
             os.fsync(f.fileno())
+        # 2. Атомарно заменяем/создаём итоговый файл в vault
+        atomic_replace(md_path_staging, md_path_vault)
 
-        # Обновляем время и права (меняем ctime)
-        os.utime(md_path, None)
-        os.chmod(md_path, 0o644)
-
-        # Синхронизируем каталог
-        force_sync_directory(VAULT_PATH)
-
-        logger.info(f"Файл сохранён: {md_path}")
+        logger.info(f"Файл сохранён (via staging): {md_path_vault}")
     except Exception as e:
         logger.error(f"Ошибка записи файла: {e}")
         await update.message.reply_text("Не удалось сохранить заметку.")
