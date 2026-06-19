@@ -4,7 +4,7 @@ services:
     container_name: obsidian-bot
     restart: unless-stopped
     volumes:
-      - /volume1/obsidian/inbox:/app/vault
+      - /volume1/obsidian/inbox:/app/vault:shared
     env_file:
       - .env
     healthcheck:

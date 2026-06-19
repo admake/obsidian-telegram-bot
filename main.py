@@ -80,6 +80,8 @@ def force_sync_directory(path):
         marker = os.path.join(path, ".sync_marker.tmp")
         with open(marker, "w") as f:
             f.write("sync")
+            f.flush()
+            os.fsync(f.fileno())
         os.remove(marker)
         logger.debug(f"Маркерный файл создан и удалён в {path}")
     except Exception as e:
