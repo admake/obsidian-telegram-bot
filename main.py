@@ -2,6 +2,7 @@ import os
 import re
 import logging
 import threading
+import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
@@ -21,6 +22,7 @@ ATTACHMENTS_PATH = os.path.join(VAULT_PATH, "Attachments")
 os.makedirs(ATTACHMENTS_PATH, exist_ok=True)
 
 
+# --- Healthcheck ---
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -28,11 +30,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"OK")
 
 
-def run_health_server():
-    server = HTTPServer(("0.0.0.0", 8080), HealthHandler)
-    server.serve_forever()
-
-
+# --- Вспомогательные функции ---
 def is_authorized(update: Update) -> bool:
     if not ALLOWED_USERS:
         return True
@@ -53,17 +51,17 @@ def get_forward_info(msg):
     return None
 
 
-def sync_filesystem(path):
-    """Принудительная синхронизация файловой системы для указанного пути"""
+def force_sync_directory(path):
+    """
+    Комплексная синхронизация каталога: обновление времени, чтение, маркерный файл.
+    """
     try:
-        # Обновляем время модификации каталога
         os.utime(path, None)
         logger.debug(f"Обновлено время каталога: {path}")
     except Exception as e:
         logger.warning(f"Не удалось обновить время каталога {path}: {e}")
 
     try:
-        # Пытаемся синхронизировать каталог (если поддерживается)
         fd = os.open(path, os.O_RDONLY)
         os.fsync(fd)
         os.close(fd)
@@ -71,7 +69,30 @@ def sync_filesystem(path):
     except Exception as e:
         logger.debug(f"fsync на каталоге не поддерживается: {e}")
 
+    try:
+        entries = os.listdir(path)
+        logger.debug(f"Прочитано {len(entries)} записей в {path}")
+    except Exception as e:
+        logger.warning(f"Не удалось прочитать каталог {path}: {e}")
 
+    # Маркерный файл для генерации событий
+    try:
+        marker = os.path.join(path, ".sync_marker.tmp")
+        with open(marker, "w") as f:
+            f.write("sync")
+        os.remove(marker)
+        logger.debug(f"Маркерный файл создан и удалён в {path}")
+    except Exception as e:
+        logger.debug(f"Не удалось создать маркерный файл: {e}")
+
+    try:
+        os.sync()
+        logger.debug("Глобальная синхронизация выполнена")
+    except Exception as e:
+        logger.debug(f"os.sync() не доступен: {e}")
+
+
+# --- Обработчик сообщений ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         await update.message.reply_text("Access denied.")
@@ -80,6 +101,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     text = msg.text or msg.caption or "Без текста"
 
+    # --- Фото ---
     media_link = ""
     try:
         if msg.photo:
@@ -87,17 +109,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             file_name = f"{msg.date.strftime('%Y%m%d-%H%M%S')}_{msg.message_id}.jpg"
             file_path = os.path.join(ATTACHMENTS_PATH, file_name)
             await file.download_to_drive(file_path)
+            # Синхронизация файла
             with open(file_path, "ab") as f:
                 f.flush()
                 os.fsync(f.fileno())
-            # Обновляем время файла
             os.utime(file_path, None)
+            os.chmod(file_path, 0o644)  # обновляем ctime
+            force_sync_directory(ATTACHMENTS_PATH)
             media_link = f"![[{file_name}]]"
     except (NetworkError, TimedOut) as e:
         logger.error(f"Ошибка загрузки фото: {e}")
         await update.message.reply_text("Не удалось загрузить фото.")
         return
 
+    # --- Метаданные ---
     timestamp = msg.date.strftime("%Y-%m-%d-%H-%M")
     safe_content = re.sub(r'[\\/*?:"<>|]', "", text)[:30].strip() or "Untitled"
 
@@ -114,24 +139,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if forward["link"]:
             forward_yaml += f"\nforward_link: {forward['link']}"
 
+    md_content = (
+        f"---\n"
+        f"aliases: [{safe_content}]\n"
+        f"tags: [telegram]\n"
+        f"source_link: {link}\n"
+        f"{forward_yaml}\n"
+        f"---\n\n"
+        f"{text}\n\n{media_link}"
+    )
+
+    # --- Запись .md файла напрямую (без временного файла) ---
     md_path = os.path.join(VAULT_PATH, f"{timestamp} - {safe_content}.md")
     try:
+        # Пишем напрямую – это вызовет событие CREATE
         with open(md_path, "w", encoding="utf-8") as f:
-            f.write(
-                f"---\n"
-                f"aliases: [{safe_content}]\n"
-                f"tags: [telegram]\n"
-                f"source_link: {link}\n"
-                f"{forward_yaml}\n"
-                f"---\n\n"
-                f"{text}\n\n{media_link}"
-            )
+            f.write(md_content)
             f.flush()
             os.fsync(f.fileno())
-        # Обновляем время модификации файла
+
+        # Обновляем время и права (меняем ctime)
         os.utime(md_path, None)
-        # Синхронизируем каталог, чтобы система увидела новый файл
-        sync_filesystem(VAULT_PATH)
+        os.chmod(md_path, 0o644)
+
+        # Синхронизируем каталог
+        force_sync_directory(VAULT_PATH)
+
         logger.info(f"Файл сохранён: {md_path}")
     except Exception as e:
         logger.error(f"Ошибка записи файла: {e}")
@@ -141,14 +174,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Saved: {safe_content}")
 
 
+# --- Глобальный обработчик ошибок ---
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Ошибка: {context.error}")
     if isinstance(context.error, (NetworkError, TimedOut, RetryAfter)):
         logger.warning("Сетевая ошибка, бот переподключится.")
 
 
+# --- Запуск ---
 if __name__ == "__main__":
-    threading.Thread(target=run_health_server, daemon=True).start()
 
     builder = ApplicationBuilder().token(TOKEN)
 
