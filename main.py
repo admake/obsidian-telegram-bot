@@ -4,6 +4,7 @@ import logging
 import threading
 import time
 import shutil
+import asyncio
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
@@ -23,6 +24,7 @@ STAGING_PATH = os.path.join(VAULT_PATH, ".staging")
 os.makedirs(STAGING_PATH, exist_ok=True)
 ATTACHMENTS_PATH = os.path.join(VAULT_PATH, "Attachments")
 os.makedirs(ATTACHMENTS_PATH, exist_ok=True)
+TRIGGER_PATH = os.path.join(VAULT_PATH, ".drive_sync")
 
 
 def force_sync_directory(path):
@@ -90,6 +92,24 @@ def atomic_replace(src: str, dst: str) -> None:
         os.remove(src)
     except FileNotFoundError:
         pass
+
+
+def touch_trigger():
+    """Обновляет триггер-файл, чтобы генерация события MODIFY была видима хосту."""
+    try:
+        # Если файла нет – создаём пустой
+        with open(TRIGGER_PATH, "a"):
+            os.utime(TRIGGER_PATH, None)
+        logger.debug(f"Триггер обновлён: {TRIGGER_PATH}")
+    except Exception as e:
+        logger.warning(f"Не удалось обновить триггер {TRIGGER_PATH}: {e}")
+
+
+async def trigger_loop():
+    """Фоновая задача, Periodically touches trigger file."""
+    while True:
+        await asyncio.sleep(30)  # каждые 30 секунд
+        touch_trigger()
 
 
 # --- Healthcheck ---
@@ -191,6 +211,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         atomic_replace(md_path_staging, md_path_vault)
 
         logger.info(f"Файл сохранён (via staging): {md_path_vault}")
+        # Обновляем триггер после каждой успешной записи
+        touch_trigger()
     except Exception as e:
         logger.error(f"Ошибка записи файла: {e}")
         await update.message.reply_text("Не удалось сохранить заметку.")
@@ -227,6 +249,10 @@ if __name__ == "__main__":
         MessageHandler(filters.TEXT | filters.CAPTION | filters.PHOTO, handle_message)
     )
     app.add_error_handler(error_handler)
+
+    # Фоновая задача для периодического триггера
+    loop = asyncio.get_event_loop()
+    loop.create_task(trigger_loop())
 
     try:
         logger.info("Бот запущен...")
